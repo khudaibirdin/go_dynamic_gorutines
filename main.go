@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -14,14 +14,14 @@ const (
 )
 
 func handler(id string, data int) {
-	fmt.Println(data)
+	log.Println(data)
 }
 
 func main() {
 	buffer := make(chan int, BUFFER_SIZE)
 	dw := DynamicWorkersPool{
 		BufferConfig: BufferConfig{
-			TopPoint: 90,
+			TopPoint:  90,
 			DownPoint: 10,
 		},
 		WorkerConfig: WorkerConfig{
@@ -29,26 +29,37 @@ func main() {
 			Min: 5,
 		},
 	}
-	
-	dw.WorkersRun(buffer, handler)
 
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go dw.WorkersRun(buffer, handler)
+
+	wg.Add(1)
 	go func() {
 		for {
-			buffer <- 100
+			select {
+			case buffer <- 100:
+				log.Print("Add")
+			default:
+				log.Print("Minus")
+			}
+			log.Printf("buffer size %d", len(buffer))
 			time.Sleep(1 * time.Second)
 		}
 	}()
+	wg.Wait()
 }
 
 type (
 	DynamicWorkersPool struct {
 		BufferConfig BufferConfig
 		WorkerConfig WorkerConfig
-		mu sync.Mutex
-		workers []Worker
+		mu           sync.Mutex
+		workers      []Worker
 	}
 	BufferConfig struct {
-		TopPoint int
+		TopPoint  int
 		DownPoint int
 	}
 	WorkerConfig struct {
@@ -62,8 +73,11 @@ type (
 	}
 )
 
+// основной запуск динамического пула воркеров
 func (dw *DynamicWorkersPool) WorkersRun(buffer chan int, handler func(id string, data int)) {
+	var wg sync.WaitGroup
 	for range dw.WorkerConfig.Min {
+		wg.Add(1)
 		dw.startWorker(buffer, handler)
 	}
 
@@ -72,11 +86,13 @@ func (dw *DynamicWorkersPool) WorkersRun(buffer chan int, handler func(id string
 		dw.mu.Lock()
 		activeWorkers := len(dw.workers)
 		dw.mu.Unlock()
-		fmt.Printf("[WorkersRun] active workers = %d, buffer len = %d\n", activeWorkers, len(buffer))
+		log.Printf("[WorkersRun] active workers = %d, buffer len = %d", activeWorkers, len(buffer))
 		if len(buffer) >= dw.BufferConfig.TopPoint && activeWorkers < dw.WorkerConfig.Max {
+			wg.Add(1)
 			dw.startWorker(buffer, handler)
 		} else if len(buffer) <= dw.BufferConfig.DownPoint && activeWorkers > dw.WorkerConfig.Min {
 			dw.stopWorker()
+			wg.Done()
 		}
 	}
 }
@@ -85,23 +101,23 @@ func (dw *DynamicWorkersPool) WorkersRun(buffer chan int, handler func(id string
 func (dw *DynamicWorkersPool) startWorker(buffer chan int, handler func(id string, data int)) {
 	ctx, cancel := context.WithCancel(context.Background())
 	worker := Worker{
-		ctx: ctx,
+		ctx:    ctx,
 		cancel: cancel,
-		id: uuid.NewString()}
+		id:     uuid.NewString()}
 	dw.workers = append(dw.workers, worker)
-	
+
 	go func() {
-		fmt.Printf("[startWorker] started worker %s\n", worker.id)
+		log.Printf("[startWorker] started worker %s", worker.id)
 		for {
 			select {
 			case <-ctx.Done():
+				log.Printf("[startWorker] stoped worker %s", worker.id)
 				return
-			case data := <- buffer:
+			case data := <-buffer:
 				handler(worker.id, data)
 			}
 		}
 	}()
-
 }
 
 // останавливаем горутину
@@ -112,5 +128,5 @@ func (dw *DynamicWorkersPool) stopWorker() {
 	last := dw.workers[len(dw.workers)-1]
 	last.cancel()
 	dw.workers = dw.workers[:len(dw.workers)-1]
-	fmt.Printf("[startWorker] stoped worker %s\n", last.id)
+	log.Printf("[startWorker] stoped worker %s", last.id)
 }
